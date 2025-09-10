@@ -25,7 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Recognize Anything Model & Tag2Text
-from ram.models import ram
+from ram.models import ram_plus
 from ram import inference_ram
 import torchvision.transforms as TS
 
@@ -49,7 +49,8 @@ def load_image(image_path):
 
 
 def check_tags_chinese(tags_chinese, pred_phrases, max_tokens=100, model="gpt-3.5-turbo"):
-    object_list = [obj.split('(')[0] for obj in pred_phrases]
+    # object_list = [obj.split('(')[0] for obj in pred_phrases]
+    object_list = [obj.rsplit('(', 1)[0].strip() for obj in pred_phrases]
     object_num = []
     for obj in set(object_list):
         object_num.append(f'{object_list.count(obj)} {obj}')
@@ -111,12 +112,53 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold,de
     # build pred
     pred_phrases = []
     scores = []
-    for logit, box in zip(logits_filt, boxes_filt):
+    final_boxes = []
+    for logit, box in zip(logits_filt, boxes_filt):        
         pred_phrase = get_phrases_from_posmap(logit > text_threshold, tokenized, tokenlizer)
+        if(pred_phrase.strip() == ""):
+            continue
         pred_phrases.append(pred_phrase + f"({str(logit.max().item())[:4]})")
         scores.append(logit.max().item())
+        final_boxes.append(box)
+    boxes_filt = torch.stack(final_boxes)
 
     return boxes_filt, torch.Tensor(scores), pred_phrases
+
+def get_single_grounding_output(model, image, caption, box_threshold, text_threshold, device="cpu"):
+    caption = caption.lower().strip()
+    if not caption.endswith("."):
+        caption = caption + "."
+    model = model.to(device)
+    image = image.to(device)
+
+    with torch.no_grad():
+        outputs = model(image[None], captions=[caption])
+
+    logits = outputs["pred_logits"].cpu().sigmoid()[0]  # (nq, 256)
+    boxes = outputs["pred_boxes"].cpu()[0]              # (nq, 4)
+
+    # filter by box threshold
+    filt_mask = logits.max(dim=1)[0] > box_threshold
+    logits_filt = logits[filt_mask]
+    boxes_filt = boxes[filt_mask]
+
+    tokenizer = model.tokenizer
+    tokenized = tokenizer(caption)
+
+    pred_phrases = []
+    scores = []
+
+    for logit, box in zip(logits_filt, boxes_filt):
+        # get index of highest scoring token
+        best_idx = logit.argmax().item()
+        best_score = logit[best_idx].item()
+        best_token = tokenizer.decode([tokenized.input_ids[best_idx]])
+
+        pred_phrases.append(f"{best_token}({best_score:.3f})")
+        scores.append(best_score)
+
+    return boxes_filt, torch.Tensor(scores), pred_phrases
+
 
 
 def show_mask(mask, ax, random_color=False):
@@ -243,7 +285,7 @@ if __name__ == "__main__":
                 ])
     
     # load model
-    ram_model = ram(pretrained=ram_checkpoint,
+    ram_model = ram_plus(pretrained=ram_checkpoint,
                                         image_size=384,
                                         vit='swin_l')
     # threshold for tagging
@@ -309,6 +351,10 @@ if __name__ == "__main__":
     # draw output image
     plt.figure(figsize=(10, 10))
     plt.imshow(image)
+    
+    plt.gca().set_facecolor("white")  
+    plt.gcf().patch.set_facecolor("white")
+    
     for mask in masks:
         show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
     for box, label in zip(boxes_filt, pred_phrases):
@@ -318,7 +364,7 @@ if __name__ == "__main__":
     plt.axis('off')
     plt.savefig(
         os.path.join(output_dir, "automatic_label_output.jpg"), 
-        bbox_inches="tight", dpi=300, pad_inches=0.0
+        bbox_inches="tight", dpi=300, pad_inches=0.0, facecolor="white"
     )
 
     save_mask_data(output_dir, tags_chinese, masks, boxes_filt, pred_phrases)
